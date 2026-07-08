@@ -55,11 +55,6 @@ import type {
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import {
-  beginSessionSwitch,
-  markHistoryHydrated,
-  markSnapshotHydrated,
-} from "@/lib/sessionPerf";
-import {
   ApiError,
   approve as approveElicitation,
   bindOnlyOnlineRunner,
@@ -1498,8 +1493,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // events to state.blocks.
     get().abortController?.abort();
 
-    if (conversationId !== null) beginSessionSwitch(conversationId);
-
     set((s) => {
       // Stash the OUTGOING conversation's still-in-flight optimistic
       // bubbles and restore the INCOMING one's. Until a send's POST
@@ -2343,7 +2336,6 @@ async function bindStream(
     const oldestItemId = page.items[0]?.id ?? null;
     set((state) => {
       const merged = mergeHistoryIntoBlocks(state, snapshotBlocks);
-      markHistoryHydrated(id, merged.length);
       return {
         blocks: merged,
         loadingConversation: false,
@@ -2372,7 +2364,6 @@ async function bindStream(
     if (get().conversationId !== id) return;
     runStickyPrefHandoff(session, id, get);
     const selections = stickySelectionFromSession(session, get);
-    markSnapshotHydrated(id);
     set((state) => snapshotHydrationPatch(session, state, id, hydratePending, selections));
   } catch (err) {
     if (get().conversationId !== id) return;

@@ -1646,7 +1646,7 @@ function MainAgentSurface({
                 </ConversationEmptyState>
               )
             ) : (
-              <div data-testid="chat-transcript-ready">
+              <div>
                 {streamBubbles.map((bubble) => (
                   <BubbleView key={bubbleKey(bubble)} bubble={bubble} />
                 ))}
@@ -1766,10 +1766,7 @@ function MainAgentSurface({
 
 function HydratingPlaceholder() {
   return (
-    <div
-      data-testid="hydrating-placeholder"
-      className="flex flex-1 items-center justify-center gap-2 text-muted-foreground text-sm"
-    >
+    <div className="flex flex-1 items-center justify-center gap-2 text-muted-foreground text-sm">
       <Loader2Icon className="size-4 animate-spin" />
       Loading conversation…
     </div>
