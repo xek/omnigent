@@ -121,6 +121,11 @@ _CEL_POLICY_HANDLER = "omnigent.policies.builtins.cel.cel_policy"
 _NATIVE_DENY_REASON = "bench-native-tool-deny"
 # How long to wait for the tool call / deny signal on a tool turn.
 _TOOL_TURN_TIMEOUT_S = 180.0
+# On a deny turn, keep reading this long past the turn's terminal event to catch
+# a response.policy_denied published near-simultaneously (the PreToolUse hook
+# evaluates around output_item.done). Session heartbeats keep the stream's lines
+# flowing, so the reader wakes to check this deadline.
+_DENY_GRACE_S = 8.0
 
 # How long to let a turn run after it reports in-progress before firing the
 # interrupt, so the cancel lands mid-turn rather than racing turn setup.
@@ -628,6 +633,13 @@ class NativeTuiDriver:
 
         def _read() -> None:
             assert self._client is not None
+            # On a deny turn, response.policy_denied is published when the
+            # PreToolUse hook evaluates — which can land at (or just after) the
+            # turn's output_item.done, so stopping on the terminal event alone
+            # races past the deny signal. Instead, once terminal is seen on a
+            # deny turn, keep reading for a bounded grace window to catch a
+            # near-simultaneous policy_denied, then stop.
+            deadline_after_terminal: float | None = None
             try:
                 with self._client.stream(
                     "GET",
@@ -636,15 +648,22 @@ class NativeTuiDriver:
                 ) as resp:
                     ready.set()
                     for line in resp.iter_lines():
-                        if not line.startswith("event:"):
-                            continue
-                        etype = line[len("event:") :].strip()
-                        events.append(etype)
-                        if etype == _POLICY_DENIED_EVENT:
-                            result.tool_call_denied = True
-                        # Stop once output is done/failed/interrupted. On a deny
-                        # the tool never runs, so the turn still ends normally.
-                        if etype in _READER_TERMINAL:
+                        if line.startswith("event:"):
+                            etype = line[len("event:") :].strip()
+                            events.append(etype)
+                            if etype == _POLICY_DENIED_EVENT:
+                                result.tool_call_denied = True
+                                return
+                            if etype in _READER_TERMINAL:
+                                if not deny:
+                                    return
+                                # Start (or keep) the grace window for a late deny.
+                                if deadline_after_terminal is None:
+                                    deadline_after_terminal = time.monotonic() + _DENY_GRACE_S
+                        if (
+                            deadline_after_terminal is not None
+                            and time.monotonic() >= deadline_after_terminal
+                        ):
                             return
             except httpx.HTTPError as exc:
                 result.error = repr(exc)
@@ -663,16 +682,12 @@ class NativeTuiDriver:
         self._poll_new_tool_calls(baseline, result)
         reader.join(timeout=10.0)
 
-        # Turn end: output finished (or, on a deny, the blocked tool left the
-        # turn to complete without producing the tool item).
-        #
-        # Live finding: on this transport a deny-turn tool call is NOT gated —
-        # the bench's native terminal-ensure launch does not thread ap_server_url
-        # into build_hook_settings, so the evaluate-policy PreToolUse hook is
-        # silently omitted and no response.policy_denied ever fires. The probe
-        # then SKIPs (tool ran, no deny) rather than reporting a false verdict.
-        # Wiring that hook on the bench launch path is the follow-up that turns
-        # native Policy DENY from `·` into a real verdict.
+        # Turn end. On a deny turn tool_call_denied is set from the observed
+        # response.policy_denied event (the server's positive signal when the
+        # PreToolUse policy hook returns DENY). Note the probe's SUPPORTED means
+        # "the tool call was routed through policy and a DENY verdict returned";
+        # whether the vendor CLI then hard-blocks the tool is a separate axis
+        # (claude-native evaluates the DENY but may still run the tool).
         result.completed = _OUTPUT_DONE_EVENT in events or bool(result.tool_calls)
         return result
 
